@@ -1,0 +1,199 @@
+#! /bin/bash
+set -euo pipefail
+# run_pipeline.sh
+# A pipeline for transcriptomic profiling of Staphylococcus aureus
+# during acute vs chronic phases of periprosthetic joint infection (PJI).
+# List of SRA accession numbers (paired-end RNA-seq samples)
+SRR_LIST=(SRR20959676 SRR20959677 SRR20959678 SRR20959679 SRR20959680 SRR20959681 SRR20959682 SRR20959683)
+
+# STEP 1: DOWNLOAD FASTQ FILES
+wget ftp://ftp.sra.ebi.ac.uk/vol1/fastq/SRR209/076/SRR20959676/SRR20959676_1.fastq.gz
+wget ftp://ftp.sra.ebi.ac.uk/vol1/fastq/SRR209/076/SRR20959676/SRR20959676_2.fastq.gz
+wget ftp://ftp.sra.ebi.ac.uk/vol1/fastq/SRR209/077/SRR20959677/SRR20959677_1.fastq.gz
+wget ftp://ftp.sra.ebi.ac.uk/vol1/fastq/SRR209/077/SRR20959677/SRR20959677_2.fastq.gz
+wget ftp://ftp.sra.ebi.ac.uk/vol1/fastq/SRR209/078/SRR20959678/SRR20959678_1.fastq.gz
+wget ftp://ftp.sra.ebi.ac.uk/vol1/fastq/SRR209/078/SRR20959678/SRR20959678_2.fastq.gz
+wget ftp://ftp.sra.ebi.ac.uk/vol1/fastq/SRR209/079/SRR20959679/SRR20959679_1.fastq.gz
+wget ftp://ftp.sra.ebi.ac.uk/vol1/fastq/SRR209/079/SRR20959679/SRR20959679_2.fastq.gz
+wget ftp://ftp.sra.ebi.ac.uk/vol1/fastq/SRR209/080/SRR20959680/SRR20959680_1.fastq.gz
+wget ftp://ftp.sra.ebi.ac.uk/vol1/fastq/SRR209/080/SRR20959680/SRR20959680_2.fastq.gz
+wget ftp://ftp.sra.ebi.ac.uk/vol1/fastq/SRR209/081/SRR20959681/SRR20959681_1.fastq.gz
+wget ftp://ftp.sra.ebi.ac.uk/vol1/fastq/SRR209/081/SRR20959681/SRR20959681_2.fastq.gz
+wget ftp://ftp.sra.ebi.ac.uk/vol1/fastq/SRR209/082/SRR20959682/SRR20959682_1.fastq.gz
+wget ftp://ftp.sra.ebi.ac.uk/vol1/fastq/SRR209/082/SRR20959682/SRR20959682_2.fastq.gz
+ls -lh
+#CREATE DIRECTORY
+mkdir raw_data
+mv *.fastq.gz raw_data/
+cd raw_data
+cd ../
+
+# STEP 2: QUALITY CHECK (FastQC + MultiQC)
+mkdir quality_control
+fastqc raw_data/*.fastq.gz -o quality_control/
+# MultiQC aggregates FastQC reports into one HTML
+multiqc quality_control/ -o quality_control
+
+# STEP 3: READ TRIMMING WITH FASTP
+mkdir trim
+for file in raw_data/*_1.fastq.gz; do
+    sample=$(basename "$file" _1.fastq.gz)
+    echo "Processing: $sample"
+
+    fastp \
+        -i "raw_data/${sample}_1.fastq.gz" \
+        -I "raw_data/${sample}_2.fastq.gz" \
+        -o "trim/${sample}_1.fastq.gz" \
+        -O "trim/${sample}_2.fastq.gz" \
+        --html "trim/${sample}_fastp.html" \
+        --json "trim/${sample}_fastp.json"
+done
+
+# STEP 4: DOWNLOAD GENOME (from Ensembl)
+pwd
+wget https://ftp.ensemblgenomes.ebi.ac.uk/pub/bacteria/release-62/fasta/bacteria_2_collection/staphylococcus_aureus_gca_001049575/dna/Staphylococcus_aureus_gca_001049575.AH1_.dna.toplevel.fa.gz
+
+mkdir genome
+
+cp Staphylococcus_aureus_gca_001049575.AH1_.dna.toplevel.fa.gz genome/
+rm -r Staphylococcus_aureus_gca_001049575.AH1_.dna.toplevel.fa.gz 
+ls
+cd genome/
+gunzip Staphylococcus_aureus_gca_001049575.AH1_.dna.toplevel.fa.gz 
+less Staphylococcus_aureus_gca_001049575.AH1_.dna.toplevel.fa 
+mv Staphylococcus_aureus_gca_001049575.AH1_.dna.toplevel.fa s_aureus.fa
+
+#STEP 5: BUILD STAR GENOME INDEX
+STAR --runMode genomeGenerate --genomeDir genomeIndex --genomeFastaFiles s_aureus.fa 
+cd ../
+#STEP 6: ALIGN READS WITH STAR
+mkdir -p mapped
+
+for r1 in trim/*_1.fastq.gz ; do
+    # derive the base sample name (remove _1.fastq.gz)
+    base=$(basename "$r1" _1.fastq.gz)
+    r2="trim/${base}_2.fastq.gz"
+
+    # make sure r2 exists
+    if [[ -f "$r2" ]]; then
+        STAR --genomeDir genome/genomeIndex \
+             --readFilesIn "$r1" "$r2" \
+             --readFilesCommand zcat \
+             --outFileNamePrefix mapped/${base}_ \
+             --outSAMtype BAM SortedByCoordinate \
+             --outSAMattributes All
+    else
+        echo "WARNING: Paired file for $r1 not found"
+    fi
+done
+ # Index BAM for IGV
+samtools view mapped/SRR20959676_Aligned.sortedByCoord.out.bam | head
+# STEP 7: COPY BAMs TO IGV FOLDER
+mkdir IGV
+cp mapped/*.bam IGV/
+cd IGV
+for bam in *_Aligned.sortedByCoord.out.bam; do
+    echo "Indexing $bam ..."
+    samtools index "$bam"
+done
+ls
+#check https://igv.org/app/
+mkdir counts
+# STEP 8: DOWNLOAD ANNOTATION 
+wgethttps://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/013/425/GCF_000013425.1_ASM1342v1/GCF_000013425.1_ASM1342v1_genomic.gff.gz
+gunzip *.gz
+mv GCF_000013425.1_ASM1342v1_genomic.gff s_aureus.gff3
+# STEP 8: COUNT READS WITH FEATURECOUNTS
+featureCounts -T 8 -p -O \
+  -t gene -g locus_tag \
+  -a genome/s_aureus.gff3 \
+  -o counts/counts.txt \
+  mapped/SRR20959676_Aligned.sortedByCoord.out.bam \
+  mapped/SRR20959677_Aligned.sortedByCoord.out.bam \
+  mapped/SRR20959678_Aligned.sortedByCoord.out.bam \
+  mapped/SRR20959679_Aligned.sortedByCoord.out.bam \
+  mapped/SRR20959680_Aligned.sortedByCoord.out.bam \
+  mapped/SRR20959681_Aligned.sortedByCoord.out.bamcd counts/
+
+R Part: Differential expression in RStudio
+# Transcriptomic comparison: S. aureus acute vs chronic PJI
+# BEFORE RUNNING:
+# put counts/counts.txt (featureCounts output) in working directory
+# create sample_metadata.tsv with columns: sample, condition (acute/chronic)
+# ensure s_aureus.gff3 is present
+# Install required packages
+#setwd
+setwd('C:/Users/HP/Downloads')
+#libraries
+library(DESeq2)
+library(pheatmap)
+## Load count matrix (from featureCounts)
+c_e_count <- read.delim('count.txt', header = T)
+# Load metadata describes which sample = acute/chronic
+c_e_sample_meta <- read.delim("sample_metadata.csv", header = TRUE, sep = ",")
+#preview
+head(c_e_count)
+head(c_e_sample_meta)
+# Keep only columns corresponding to sample IDs in metadata
+raw_counts <- c_e_count[, c_e_sample_meta$sample]
+head(raw_counts)
+# Assign rownames = Gene IDs
+rownames(raw_counts) <- c_e_count$Geneid
+head(raw_counts)
+# Build DESeq2 dataset
+dds <- DESeqDataSetFromMatrix(countData = raw_counts,
+                              colData = c_e_sample_meta,
+                              design = ~condition)
+dds <- DESeq(dds)
+# Extract results
+final_res <- results(dds)
+head(final_res)
+# Plot density of p-values
+plot(density(x = na.omit(final_res$pvalue)))
+# Volcano plot
+plot(x = final_res$log2FoldChange, 
+     y = -log10(final_res$padj),
+     cex = 0.25,
+     pch = 19, 
+     col = 'grey',
+     ylim = c(0,20),
+     ylab = 'Adjusted P-Value',
+     xlab = 'Log2 FC')
+abline(v = c(-2, 2), h = -log10(0.05), lwd = 0.5, lty = 2)
+# Highlight upregulated genes
+upregulated <- subset(final_res, padj < 0.05 & log2FoldChange > 2)
+points(upregulated$log2FoldChange,
+       y = -log10(upregulated$padj), 
+       cex = 0.35,
+       pch = 19,
+       col = 'salmon')
+abline(v = c(-2, 2), h = -log10(0.05), lwd = 0.5, lty = 2)
+upregulated <- subset(final_res, padj < 0.05 & log2FoldChange > 2)
+points(upregulated$log2FoldChange,
+       y = -log10(upregulated$padj), 
+       cex = 0.35,
+       pch = 19,
+       col = 'salmon')
+# Highlight downregulated genes
+downregulated <- subset(final_res, padj < 0.05 & log2FoldChange < -2)
+points(downregulated$log2FoldChange,
+       y = -log10(downregulated$padj), 
+       cex = 0.35,
+       pch = 19,
+       col = 'lightblue')
+mtext('A simple volcano plot')
+# Heatmap of significant DEGs
+degs <- rbind(raw_counts[rownames(upregulated),], 
+              raw_counts[rownames(downregulated),])
+pheatmap(degs, 
+         cluster_rows = F,
+         cluster_cols = F,
+         show_rownames = F,
+         scale = 'row',
+         show_colnames = T)
+rownames(upregulated)
+rownames(downregulated)
+# Export results
+write.csv(upregulated, 'upregulated.csv')
+write.csv(downregulated, 'downregulated.csv')
+write.csv(raw_counts, 'raw_counts.csv')
